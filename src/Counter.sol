@@ -21,7 +21,21 @@ contract Counter is BaseHook {
     mapping(PoolId => uint256 count) public beforeSwapCount;
     mapping(PoolId => uint256 count) public afterSwapCount;
 
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
+    address public immutable developer;
+
+    constructor(IPoolManager _poolManager, address _developer) BaseHook(_poolManager) {
+        developer = _developer;
+    }
+
+    struct TraderInfo {
+        uint256 volume;
+        uint256 rewardDebt;
+    }
+
+    mapping(address => TraderInfo) public traders;
+    uint256 public totalVolume;
+    uint256 public accRewardPerShare;
+    uint256 public devRewards;
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({

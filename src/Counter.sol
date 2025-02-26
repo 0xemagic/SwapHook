@@ -60,11 +60,16 @@ contract Counter is BaseHook {
     // NOTE: see IHooks.sol for function documentation
     // -----------------------------------------------
 
-    function _beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, bytes calldata)
+    function _beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata swapParams, bytes calldata)
         internal
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        uint256 fee = uint256(swapParams.amountSpecified) / 1000; // 0.1% fee
+        uint256 traderReward = fee / 2; // 50% of fee goes to traders
+        uint256 devReward = fee - traderReward; // Remaining 50% to dev
+
+        devRewards += devReward;
         beforeSwapCount[key.toId()]++;
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }

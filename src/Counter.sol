@@ -25,13 +25,10 @@ contract Counter is BaseHook {
     // a single hook contract should be able to service multiple pools
     // ---------------------------------------------------------------
 
-    mapping(PoolId => uint256 count) public beforeSwapCount;
-    mapping(PoolId => uint256 count) public afterSwapCount;
-
     address public immutable developer;
     address constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7; // USDT Token Address
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // USDC Token Address
-    IPool public immutable aavePool = IPool(0x794a6135B16114791212725b7E55E372DF2e5Fb8);
+    IPool public immutable aavePool = IPool(0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2);
 
     struct TraderInfo {
         uint256 volume;
@@ -44,7 +41,8 @@ contract Counter is BaseHook {
     uint256 public devRewards;
 
     constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
-        developer = msg.sender;
+        IERC20(USDT).forceApprove(address(aavePool), type(uint256).max);
+        IERC20(USDC).forceApprove(address(aavePool), type(uint256).max);
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -69,7 +67,6 @@ contract Counter is BaseHook {
     // -----------------------------------------------
     // NOTE: see IHooks.sol for function documentation
     // -----------------------------------------------
-
     function _beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata swapParams, bytes calldata)
         internal
         override
@@ -81,6 +78,17 @@ contract Counter is BaseHook {
         uint256 fee = swapAmount / 1000; // 0.1% fee
         uint256 traderReward = fee / 2; // 50% of fee goes to traders
         uint256 devReward = fee - traderReward; // Remaining 50% to dev
+
+        devRewards += devReward;
+        // Update trader volume and rewards
+        TraderInfo storage trader = traders[msg.sender];
+        if (totalVolume > 0) {
+            trader.rewardDebt += (trader.volume * accRewardPerShare) / 1e12;
+        }
+        trader.volume += swapAmount;
+        totalVolume += swapAmount;
+        accRewardPerShare += (traderReward * 1e12) / totalVolume;
+
         Currency feeCurrency = swapParams.zeroForOne ? key.currency0 : key.currency1;
         poolManager.take(feeCurrency, address(this), devReward);
        
@@ -88,23 +96,20 @@ contract Counter is BaseHook {
             int128(int256(devReward)), // Specified delta (fee amount)
             0 // Unspecified delta (no change)
         );
-        devRewards += devReward;
-        // beforeSwapCount[poolId]++;
         return (BaseHook.beforeSwap.selector, returnDelta, 0);
     }
 
-    function _afterSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, BalanceDelta, bytes calldata)
-        internal
-        override
-        returns (bytes4, int128)
-    {
-        afterSwapCount[key.toId()]++;
-        return (BaseHook.afterSwap.selector, 0);
-    }
+    // function _afterSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, BalanceDelta, bytes calldata)
+    //     internal
+    //     override
+    //     returns (bytes4, int128)
+    // {
+    //     return (BaseHook.afterSwap.selector, 0);
+    // }
 
     function depositToAave(address token, uint256 amount) internal {
         IERC20(token).approve(address(aavePool), amount);
-        aavePool.deposit(token, amount, address(this), 0);
+        aavePool.supply(token, amount, address(this), 0);
     }
 
     function withdrawFromAave(address user, uint256 amount) internal {
@@ -113,5 +118,21 @@ contract Counter is BaseHook {
         } else {
             aavePool.withdraw(USDC, amount, user);
         }
+    }
+
+    function withdrawReward() external {
+        TraderInfo storage trader = traders[msg.sender];
+        uint256 pending = (trader.volume * accRewardPerShare) / 1e12 - trader.rewardDebt;
+        trader.rewardDebt = (trader.volume * accRewardPerShare) / 1e12;
+
+        uint256 totalReward = pending;
+        if (msg.sender == developer) {
+            totalReward += devRewards;
+            devRewards = 0;
+        }
+
+        require(totalReward > 0, "No rewards to withdraw");
+
+        withdrawFromAave(msg.sender, totalReward);
     }
 }

@@ -227,6 +227,6 @@ contract CounterTest is Test, IERC721Receiver {
         swapExactInputSingle(poolKey, swapAmount2, 0, Trader2);
         vm.stopPrank();
         assertEq(hook.pendingReward(Trader2, Currency.wrap(address(USDC))), rewards + rewards2 * 1 / 3);
-        assertEq(hook.pendingReward(Trader2, Currency.wrap(address(USDT))), rewards2 * 1 / 3);
+        assertEq(hook.pendingReward(Trader2, Currency.wrap(address(USDT))), rewards2 * 2 / 3);
     }
 }

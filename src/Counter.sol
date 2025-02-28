@@ -144,7 +144,7 @@ contract Counter is BaseHook {
         depositToAave(Currency.unwrap(feeCurrency), fee);
 
         totalShareTokenShares[feeCurrency] += fee;
-        devFee[feeCurrency] += fee / 2;
+        devFee[feeCurrency] += (fee - fee / 2);
         address caller = abi.decode(hookData, (address));
 
         TraderInfo storage traderInfo = traderInfos[feeCurrency][caller];

@@ -25,6 +25,7 @@ import {IUniversalRouter} from "universal-router/contracts/interfaces/IUniversal
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import "forge-std/console2.sol";
 
 contract CounterTest is Test, IERC721Receiver {
     using PoolIdLibrary for PoolKey;
@@ -48,7 +49,6 @@ contract CounterTest is Test, IERC721Receiver {
 
     address constant Trader1 = address(0xe2fF3c4a7b87df9a6Acabf3a848083198080a763);
     address constant Trader2 = address(0xee0d9c760b28ADb71aE0deFBD5236Cc806B38118);
-    address constant Trader3 = address(0x92d85C11EEF11A001B10262Ae66B810f87C3ea33);
 
     function initPool() public {
         (, bytes32 salt) = HookMiner.find(
@@ -174,11 +174,59 @@ contract CounterTest is Test, IERC721Receiver {
     function SwapFeeTest() public {
         initPool();
         permit2.approve(USDC, address(universalRouter), type(uint160).max, uint48(block.timestamp + 100));
-        uint128 swapAmount = 10_000e6;
+        uint128 swapAmount = 5_000e6;
         uint256 fee = swapAmount / 1000;
         uint256 shareAmount = IERC20(USDC).balanceOf(address(this));
         swapExactInputSingle(poolKey, swapAmount, 0, address(this));
         assertEq(IERC20(USDC).balanceOf(aUSDC) - shareAmount, fee);
         assertEq(IERC20(aUSDC).balanceOf(address(hook)), fee);
+        permit2.approve(USDT, address(universalRouter), type(uint160).max, uint48(block.timestamp + 100));
+        uint128 swapUSDTAmount = 5_000e6;
+        uint256 feeUSDT = swapUSDTAmount / 1000;
+        uint256 shareAmountUSDT = IERC20(USDT).balanceOf(address(this));
+        swapExactInputSingle(poolKey, swapUSDTAmount, 0, address(this));
+        assertEq(IERC20(USDT).balanceOf(aUSDT) - shareAmountUSDT, feeUSDT);
+        assertEq(IERC20(aUSDT).balanceOf(address(hook)), feeUSDT);
+    }
+
+    function WithdrawTest() public {
+        initPool();
+        vm.startPrank(Trader1);
+        permit2.approve(address(USDC), address(universalRouter), type(uint160).max, uint48(block.timestamp + 100));
+        uint128 swapAmount = 5_000e6;
+        swapExactInputSingle(poolKey, swapAmount, 0, Trader1);
+        uint256 fee = swapAmount / 1000;
+        assertEq(hook.devFee(Currency.wrap(address(USDT))), 0);
+        assertEq(hook.devFee(Currency.wrap(address(USDC))), fee / 2);
+        assertEq(hook.pendingReward(Trader1, Currency.wrap(address(USDC))), fee / 2);
+        vm.stopPrank();
+
+        vm.startPrank(address(this));
+        uint256 oriUSDCBal = IERC20(USDC).balanceOf(Trader1);
+        hook.claimFee(Currency.wrap(USDC));
+        assertEq(hook.devFee(Currency.wrap(USDC)), 0);
+        assertEq(IERC20(USDC).balanceOf(Trader1) - oriUSDCBal, fee / 2);
+        vm.stopPrank();
+    }
+
+    function RewardTest() public {
+        initPool();
+        vm.startPrank(Trader1);
+        uint128 swapAmount = 5_000e6;
+        uint256 rewards = swapAmount / 2000;
+        swapExactInputSingle(poolKey, swapAmount, 0, Trader1);
+        vm.stopPrank();
+        permit2.approve(address(USDC), address(universalRouter), type(uint160).max, uint48(block.timestamp + 60));
+        swapExactInputSingle(poolKey, swapAmount, 0, Trader1);
+        vm.stopPrank();
+        assertEq(hook.pendingReward(Trader1, Currency.wrap(address(USDC))), rewards);
+
+        vm.startPrank(Trader2);
+        uint128 swapAmount2 = 10_000e6;
+        uint256 rewards2 = swapAmount2 / 2000;
+        swapExactInputSingle(poolKey, swapAmount2, 0, Trader2);
+        vm.stopPrank();
+        assertEq(hook.pendingReward(Trader2, Currency.wrap(address(USDC))), rewards + rewards2 * 1 / 3);
+        assertEq(hook.pendingReward(Trader2, Currency.wrap(address(USDT))), rewards2 * 1 / 3);
     }
 }

@@ -8,6 +8,7 @@ import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
+import "v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
@@ -15,6 +16,7 @@ import {IPool} from "aave-v3-core/contracts/interfaces/IPool.sol";
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract Counter is BaseHook {
     using PoolIdLibrary for PoolKey;
@@ -25,7 +27,6 @@ contract Counter is BaseHook {
     // a single hook contract should be able to service multiple pools
     // ---------------------------------------------------------------
 
-    address public immutable developer;
     address constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7; // USDT Token Address
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // USDC Token Address
     IPool public immutable aavePool = IPool(0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2);
@@ -35,10 +36,16 @@ contract Counter is BaseHook {
         uint256 rewardDebt;
     }
 
-    mapping(address => TraderInfo) public traders;
-    uint256 public totalVolume;
-    uint256 public accRewardPerShare;
-    uint256 public devRewards;
+    mapping(Currency => IERC20) public shareTokens;
+    mapping(Currency => uint256) public totalShareTokenShares;
+    mapping(Currency => mapping(address => TraderInfo)) public traderInfos;
+
+    mapping(Currency => uint256) public devFee;
+    mapping(Currency => uint256) public totalFee;
+    mapping(Currency => uint256) public rewardPerShare;
+    mapping(Currency => uint256) public totalVolume;
+
+    error UnsupportedCurrency();
 
     constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
         IERC20(USDT).forceApprove(address(aavePool), type(uint256).max);
@@ -47,53 +54,108 @@ contract Counter is BaseHook {
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
-            beforeInitialize: false,
+            beforeInitialize: true,
             afterInitialize: false,
             beforeAddLiquidity: false,
             afterAddLiquidity: false,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
             beforeSwap: true,
-            afterSwap: true,
+            afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
-            beforeSwapReturnDelta: false,
+            beforeSwapReturnDelta: true,
             afterSwapReturnDelta: false,
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
     }
 
+    function pendingReward(address user, Currency currency) public view returns (uint256) {
+        return (traderInfos[currency][user].volume * rewardPerShare[currency]) / 1e18
+            - traderInfos[currency][user].rewardDebt;
+    }
+
+    function realPendingReward(address user, Currency currency) external view returns (uint256) {
+        uint256 share = pendingReward(user, currency);
+        uint256 reward =
+            (share * (shareTokens[currency].balanceOf(address(this)) * 1e18) / totalShareTokenShares[currency]) / 1e18;
+        return reward;
+    }
+
+    function depositToAave(address token, uint256 amount) internal {
+        IERC20(token).approve(address(aavePool), amount);
+        aavePool.supply(token, amount, address(this), 0);
+    }
+
+    function withdrawFromAave(address user, uint256 amount, Currency currency) internal returns (uint256) {
+        uint256 amount =
+            (amount * (shareTokens[currency].balanceOf(address(this)) * 1e18) / totalShareTokenShares[currency]) / 1e18;
+        totalShareTokenShares[currency] -= amount;
+        return aavePool.withdraw(Currency.unwrap(currency), amount, user);
+    }
+
+    function setShareTokens(address shareToken, Currency currency) external {
+        shareTokens[currency] = IERC20(shareToken);
+    }
+
+    function _claimFee(address user, Currency currency) internal returns (uint256) {
+        uint256 pendingReward = pendingReward(user, currency);
+        TraderInfo storage traderInfo = traderInfos[currency][user];
+        if (pendingReward > 0) {
+            traderInfo.rewardDebt = (traderInfo.volume * rewardPerShare[currency]) / 1e18;
+        }
+        return pendingReward;
+    }
+
+    function claimFee(Currency currency) external {
+        uint256 rewards = _claimFee(msg.sender, currency);
+        withdrawFromAave(msg.sender, rewards, currency);
+    }
+
+    function claimHookFee(Currency currency) external {
+        withdrawFromAave(msg.sender, devFee[currency], currency);
+        devFee[currency] = 0;
+    }
     // -----------------------------------------------
     // NOTE: see IHooks.sol for function documentation
     // -----------------------------------------------
-    function _beforeSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata swapParams, bytes calldata)
-        internal
-        override
-        returns (bytes4, BeforeSwapDelta, uint24)
-    {
-        require(key.currency0 == Currency.wrap(USDC) && key.currency1 == Currency.wrap(USDT));
+
+    function _beforeInitialize(address, PoolKey calldata key, uint160) internal override returns (bytes4) {
+        if (equals(key.currency0, Currency.wrap(USDC)) && equals(key.currency1, Currency.wrap(USDT))) {
+            return BaseHook.beforeInitialize.selector;
+        }
+
+        revert UnsupportedCurrency();
+    }
+
+    function _beforeSwap(
+        address,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata swapParams,
+        bytes calldata hookData
+    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
         uint256 swapAmount =
             swapParams.amountSpecified < 0 ? uint256(-swapParams.amountSpecified) : uint256(swapParams.amountSpecified);
         uint256 fee = swapAmount / 1000; // 0.1% fee
-        uint256 traderReward = fee / 2; // 50% of fee goes to traders
-        uint256 devReward = fee - traderReward; // Remaining 50% to dev
+        Currency feeCurrency = swapParams.zeroForOne ? Currency.wrap(USDC) : Currency.wrap(USDT);
+        poolManager.take(feeCurrency, address(this), fee);
 
-        devRewards += devReward;
-        // Update trader volume and rewards
-        TraderInfo storage trader = traders[msg.sender];
-        if (totalVolume > 0) {
-            trader.rewardDebt += (trader.volume * accRewardPerShare) / 1e12;
-        }
-        trader.volume += swapAmount;
-        totalVolume += swapAmount;
-        accRewardPerShare += (traderReward * 1e12) / totalVolume;
+        depositToAave(Currency.unwrap(feeCurrency), fee);
 
-        Currency feeCurrency = swapParams.zeroForOne ? key.currency0 : key.currency1;
-        poolManager.take(feeCurrency, address(this), devReward);
-       
+        totalShareTokenShares[feeCurrency] += fee;
+        devFee[feeCurrency] += fee / 2;
+        address caller = abi.decode(hookData, (address));
+
+        TraderInfo storage traderInfo = traderInfos[feeCurrency][caller];
+        traderInfo.rewardDebt += (swapAmount * rewardPerShare[feeCurrency]) / 1e18;
+        traderInfo.volume += swapAmount;
+        totalVolume[feeCurrency] += swapAmount;
+
+        rewardPerShare[feeCurrency] += (swapAmount * 1e18) / totalShareTokenShares[feeCurrency];
+
         BeforeSwapDelta returnDelta = toBeforeSwapDelta(
-            int128(int256(devReward)), // Specified delta (fee amount)
+            int128(int256(fee)), // Specified delta (fee amount)
             0 // Unspecified delta (no change)
         );
         return (BaseHook.beforeSwap.selector, returnDelta, 0);
@@ -106,33 +168,4 @@ contract Counter is BaseHook {
     // {
     //     return (BaseHook.afterSwap.selector, 0);
     // }
-
-    function depositToAave(address token, uint256 amount) internal {
-        IERC20(token).approve(address(aavePool), amount);
-        aavePool.supply(token, amount, address(this), 0);
-    }
-
-    function withdrawFromAave(address user, uint256 amount) internal {
-        if (traders[user].volume > 0) {
-            aavePool.withdraw(USDT, amount, user);
-        } else {
-            aavePool.withdraw(USDC, amount, user);
-        }
-    }
-
-    function withdrawReward() external {
-        TraderInfo storage trader = traders[msg.sender];
-        uint256 pending = (trader.volume * accRewardPerShare) / 1e12 - trader.rewardDebt;
-        trader.rewardDebt = (trader.volume * accRewardPerShare) / 1e12;
-
-        uint256 totalReward = pending;
-        if (msg.sender == developer) {
-            totalReward += devRewards;
-            devRewards = 0;
-        }
-
-        require(totalReward > 0, "No rewards to withdraw");
-
-        withdrawFromAave(msg.sender, totalReward);
-    }
 }

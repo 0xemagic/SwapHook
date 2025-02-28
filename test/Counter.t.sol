@@ -13,83 +13,172 @@ import {CurrencyLibrary, Currency} from "v4-core/src/types/Currency.sol";
 import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {Counter} from "../src/Counter.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
+import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
+import {Commands} from "universal-router/contracts/libraries/Commands.sol";
+import {IV4Router} from "v4-periphery/src/interfaces/IV4Router.sol";
 
 import {LiquidityAmounts} from "v4-core/test/utils/LiquidityAmounts.sol";
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
-import {EasyPosm} from "./utils/EasyPosm.sol";
-import {Fixtures} from "./utils/Fixtures.sol";
+import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
+import {Actions} from "v4-periphery/src/libraries/Actions.sol";
+import {IUniversalRouter} from "universal-router/contracts/interfaces/IUniversalRouter.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
-contract CounterTest is Test, Fixtures {
-    using EasyPosm for IPositionManager;
+contract CounterTest is Test, IERC721Receiver {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
+    using SafeERC20 for IERC20;
 
     Counter hook;
     PoolId poolId;
+    PoolKey poolKey;
+    uint160 initSqrtPriceX96;
 
-    uint256 tokenId;
-    int24 tickLower;
-    int24 tickUpper;
+    IPositionManager constant positionManager = IPositionManager(0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e);
+    IPoolManager constant poolManager = IPoolManager(0x000000000004444c5dc75cB358380D2e3dE08A90);
+    IPermit2 constant permit2 = IPermit2(0x000000000022D473030F116dDEE9F6B43aC78BA3);
+    IUniversalRouter constant universalRouter = IUniversalRouter(0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af);
+    address constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address constant aUSDC = 0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c;
+    address constant aUSDT = 0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a;
 
-    // function setUp() public {
-    //     // creates the pool manager, utility routers, and test tokens
-    //     deployFreshManagerAndRouters();
-    //     deployMintAndApprove2Currencies();
+    address constant Trader1 = address(0xe2fF3c4a7b87df9a6Acabf3a848083198080a763);
+    address constant Trader2 = address(0xee0d9c760b28ADb71aE0deFBD5236Cc806B38118);
+    address constant Trader3 = address(0x92d85C11EEF11A001B10262Ae66B810f87C3ea33);
 
-    //     deployAndApprovePosm(manager);
+    function initPool() public {
+        (, bytes32 salt) = HookMiner.find(
+            address(this),
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG),
+            type(Counter).creationCode,
+            abi.encode(address(poolManager))
+        );
+        hook = new Counter{salt: salt}(poolManager);
 
-    //     // Deploy the hook to an address with the correct flags
-    //     address flags = address(
-    //         uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG) ^ (0x4444 << 144) // Namespace the hook to avoid collisions
-    //     );
-    //     bytes memory constructorArgs = abi.encode(manager); //Add all the necessary constructor arguments from the hook
-    //     deployCodeTo("Counter.sol:Counter", constructorArgs, flags);
-    //     hook = Counter(flags);
+        poolKey = PoolKey({
+            currency0: Currency.wrap(USDC),
+            currency1: Currency.wrap(USDT),
+            fee: 10000,
+            tickSpacing: 200,
+            hooks: IHooks(address(hook))
+        });
 
-    //     // Create the pool
-    //     key = PoolKey(currency0, currency1, 3000, 60, IHooks(hook));
-    //     poolId = key.toId();
-    //     manager.initialize(key, SQRT_PRICE_1_1);
+        hook.setShareTokens(aUSDC, Currency.wrap(USDC));
+        hook.setShareTokens(aUSDT, Currency.wrap(USDT));
 
-    //     // Provide full-range liquidity to the pool
-    //     tickLower = TickMath.minUsableTick(key.tickSpacing);
-    //     tickUpper = TickMath.maxUsableTick(key.tickSpacing);
+        initSqrtPriceX96 = uint160(TickMath.getSqrtPriceAtTick(0));
+        poolManager.initialize(poolKey, initSqrtPriceX96);
+        deal(USDC, address(this), 1_000_000e6);
+        deal(USDT, address(this), 1_000_000e6);
+        IERC20(USDC).forceApprove(address(permit2), type(uint256).max);
+        IERC20(USDT).forceApprove(address(permit2), type(uint256).max);
+        permit2.approve(USDC, address(positionManager), type(uint160).max, uint48(block.timestamp + 100));
+        permit2.approve(USDT, address(positionManager), type(uint160).max, uint48(block.timestamp + 100));
 
-    //     uint128 liquidityAmount = 100e18;
+        bytes memory actions = abi.encodePacked(uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR));
+        bytes[] memory params = new bytes[](2);
+        params[0] = abi.encode(poolKey, -200, 200, 1_000_000e6, type(uint256).max, type(uint256).max, address(this), "");
+        params[1] = abi.encode(Currency.wrap(address(USDC)), Currency.wrap(address(USDT)));
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + 100);
+    }
 
-    //     (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
-    //         SQRT_PRICE_1_1,
-    //         TickMath.getSqrtPriceAtTick(tickLower),
-    //         TickMath.getSqrtPriceAtTick(tickUpper),
-    //         liquidityAmount
-    //     );
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return this.onERC721Received.selector;
+    }
 
-    //     (tokenId,) = posm.mint(
-    //         key,
-    //         tickLower,
-    //         tickUpper,
-    //         liquidityAmount,
-    //         amount0Expected + 1,
-    //         amount1Expected + 1,
-    //         address(this),
-    //         block.timestamp,
-    //         ZERO_BYTES
-    //     );
-    // }
+    function swapExactInputSingle(PoolKey memory key, uint128 amountIn, uint128 minAmountOut, address user)
+        public
+        returns (uint256 amountOut)
+    {
+        // Encode the Universal Router command
+        bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));
+        bytes[] memory inputs = new bytes[](1);
+
+        // Encode V4Router actions
+        bytes memory actions =
+            abi.encodePacked(uint8(Actions.SWAP_EXACT_IN_SINGLE), uint8(Actions.SETTLE_ALL), uint8(Actions.TAKE_ALL));
+
+        // Prepare parameters for each action
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(
+            IV4Router.ExactInputSingleParams({
+                poolKey: key,
+                zeroForOne: true,
+                amountIn: amountIn,
+                amountOutMinimum: minAmountOut,
+                hookData: abi.encode(user)
+            })
+        );
+        params[1] = abi.encode(key.currency0, amountIn);
+        params[2] = abi.encode(key.currency1, minAmountOut);
+
+        // Combine actions and params into inputs
+        inputs[0] = abi.encode(actions, params);
+
+        // Execute the swap
+        universalRouter.execute(commands, inputs, block.timestamp + 60);
+
+        // Verify and return the output amount
+        amountOut = IERC20(Currency.unwrap(key.currency1)).balanceOf(address(this));
+        require(amountOut >= minAmountOut, "Insufficient output amount");
+        return amountOut;
+    }
 
     function setUp() public {
         vm.createSelectFork(vm.envString("ETH_RPC_URL"));
+
+        deal(address(USDC), Trader1, 1_000_000e6);
+        deal(address(USDT), Trader1, 1_000_000e6);
+        deal(address(USDC), Trader2, 1_000_000e6);
+        deal(address(USDT), Trader2, 1_000_000e6);
+        deal(address(USDC), Trader3, 1_000_000e6);
+        deal(address(USDT), Trader3, 1_000_000e6);
+
+        vm.startPrank(Trader1);
+        IERC20(USDC).forceApprove(address(permit2), type(uint256).max);
+        IERC20(USDT).forceApprove(address(permit2), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(Trader2);
+        IERC20(USDC).forceApprove(address(permit2), type(uint256).max);
+        IERC20(USDT).forceApprove(address(permit2), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(Trader3);
+        IERC20(USDC).forceApprove(address(permit2), type(uint256).max);
+        IERC20(USDT).forceApprove(address(permit2), type(uint256).max);
+        vm.stopPrank();
     }
 
-    function testCounterHooks() public {
-        // positions were created in setup()
-        // Perform a test swap //
-        // bool zeroForOne = true;
-        // int256 amountSpecified = -1e18; // negative number indicates exact input swap!
-        // BalanceDelta swapDelta = swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
-        // // ------------------- //
+    function PoolCreationTest() public {
+        initPool();
+    }
 
-        // assertEq(int256(swapDelta.amount0()), amountSpecified);
+    function HookDeployTest() public {
+        initPool();
+        PoolKey memory invalidKey = PoolKey({
+            currency0: Currency.wrap(address(USDC)),
+            currency1: Currency.wrap(address(aUSDT)),
+            fee: 10000,
+            tickSpacing: 200,
+            hooks: IHooks(address(hook))
+        });
+        vm.expectRevert();
+        poolManager.initialize(invalidKey, initSqrtPriceX96);
+    }
+
+    function SwapFeeTest() public {
+        initPool();
+        permit2.approve(USDC, address(universalRouter), type(uint160).max, uint48(block.timestamp + 100));
+        uint128 swapAmount = 10_000e6;
+        uint256 fee = swapAmount / 1000;
+        uint256 shareAmount = IERC20(USDC).balanceOf(address(this));
+        swapExactInputSingle(poolKey, swapAmount, 0, address(this));
+        assertEq(IERC20(USDC).balanceOf(aUSDC) - shareAmount, fee);
+        assertEq(IERC20(aUSDC).balanceOf(address(hook)), fee);
     }
 }

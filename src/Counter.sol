@@ -13,6 +13,8 @@ import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {IPool} from "aave-v3-core/contracts/interfaces/IPool.sol";
+import "forge-std/console2.sol";
+
 
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -79,18 +81,18 @@ contract Counter is BaseHook {
     function realPendingReward(address user, Currency currency) external view returns (uint256) {
         uint256 share = pendingReward(user, currency);
         uint256 reward =
-            (share * (shareTokens[currency].balanceOf(address(this)) * 1e18) / totalShareTokenShares[currency]) / 1e18;
+            (share * ((shareTokens[currency].balanceOf(address(this)) * 1e18) / totalShareTokenShares[currency])) / 1e18;
         return reward;
     }
 
     function depositToAave(address token, uint256 amount) internal {
-        IERC20(token).approve(address(aavePool), amount);
+        totalShareTokenShares[Currency.wrap(token)] += amount;
         aavePool.supply(token, amount, address(this), 0);
     }
 
     function withdrawFromAave(address user, uint256 amount, Currency currency) internal returns (uint256) {
         uint256 amount =
-            (amount * (shareTokens[currency].balanceOf(address(this)) * 1e18) / totalShareTokenShares[currency]) / 1e18;
+            (amount * ((shareTokens[currency].balanceOf(address(this)) * 1e18) / totalShareTokenShares[currency])) / 1e18;
         totalShareTokenShares[currency] -= amount;
         return aavePool.withdraw(Currency.unwrap(currency), amount, user);
     }
@@ -101,6 +103,7 @@ contract Counter is BaseHook {
 
     function _claimFee(address user, Currency currency) internal returns (uint256) {
         uint256 pendingReward = pendingReward(user, currency);
+        console2.log("pendingReward:", pendingReward);
         TraderInfo storage traderInfo = traderInfos[currency][user];
         if (pendingReward > 0) {
             traderInfo.rewardDebt = (traderInfo.volume * rewardPerShare[currency]) / 1e18;
@@ -143,8 +146,9 @@ contract Counter is BaseHook {
 
         depositToAave(Currency.unwrap(feeCurrency), fee);
 
-        totalShareTokenShares[feeCurrency] += fee;
-        devFee[feeCurrency] += (fee - fee / 2);
+
+        totalFee[feeCurrency] += fee;
+        devFee[feeCurrency] += fee / 2;
         address caller = abi.decode(hookData, (address));
 
         TraderInfo storage traderInfo = traderInfos[feeCurrency][caller];
@@ -152,7 +156,7 @@ contract Counter is BaseHook {
         traderInfo.volume += swapAmount;
         totalVolume[feeCurrency] += swapAmount;
 
-        rewardPerShare[feeCurrency] += (swapAmount * 1e18) / totalShareTokenShares[feeCurrency];
+        rewardPerShare[feeCurrency] += ((fee - fee / 2) * 1e18) / totalVolume[feeCurrency];
 
         BeforeSwapDelta returnDelta = toBeforeSwapDelta(
             int128(int256(fee)), // Specified delta (fee amount)

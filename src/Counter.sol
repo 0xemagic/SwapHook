@@ -20,7 +20,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract Counter is BaseHook {
+contract Counter is BaseHook, Ownable {
     using PoolIdLibrary for PoolKey;
     using SafeERC20 for IERC20;
 
@@ -49,7 +49,7 @@ contract Counter is BaseHook {
 
     error UnsupportedCurrency();
 
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
+    constructor(IPoolManager _poolManager) BaseHook(_poolManager) Ownable(msg.sender) {
         IERC20(USDT).forceApprove(address(aavePool), type(uint256).max);
         IERC20(USDC).forceApprove(address(aavePool), type(uint256).max);
     }
@@ -85,19 +85,19 @@ contract Counter is BaseHook {
         return reward;
     }
 
-    function depositToAave(address token, uint256 amount) internal {
+    function _depositToAave(address token, uint256 amount) internal {
         totalShareTokenShares[Currency.wrap(token)] += amount;
         aavePool.supply(token, amount, address(this), 0);
     }
 
-    function withdrawFromAave(address user, uint256 amount, Currency currency) internal returns (uint256) {
+    function _withdrawFromAave(address user, uint256 amount, Currency currency) internal returns (uint256) {
         uint256 amount =
             (amount * ((shareTokens[currency].balanceOf(address(this)) * 1e18) / totalShareTokenShares[currency])) / 1e18;
         totalShareTokenShares[currency] -= amount;
         return aavePool.withdraw(Currency.unwrap(currency), amount, user);
     }
 
-    function setShareTokens(address shareToken, Currency currency) external {
+    function setShareTokens(address shareToken, Currency currency) external onlyOwner {
         shareTokens[currency] = IERC20(shareToken);
     }
 
@@ -113,11 +113,11 @@ contract Counter is BaseHook {
 
     function claimFee(Currency currency) external {
         uint256 rewards = _claimFee(msg.sender, currency);
-        withdrawFromAave(msg.sender, rewards, currency);
+        _withdrawFromAave(msg.sender, rewards, currency);
     }
 
-    function claimHookFee(Currency currency) external {
-        withdrawFromAave(msg.sender, devFee[currency], currency);
+    function claimHookFee(Currency currency) external onlyOwner {
+        _withdrawFromAave(msg.sender, devFee[currency], currency);
         devFee[currency] = 0;
     }
     // -----------------------------------------------
@@ -144,7 +144,7 @@ contract Counter is BaseHook {
         Currency feeCurrency = swapParams.zeroForOne ? Currency.wrap(USDC) : Currency.wrap(USDT);
         poolManager.take(feeCurrency, address(this), fee);
 
-        depositToAave(Currency.unwrap(feeCurrency), fee);
+        _depositToAave(Currency.unwrap(feeCurrency), fee);
 
 
         totalFee[feeCurrency] += fee;
@@ -164,12 +164,4 @@ contract Counter is BaseHook {
         );
         return (BaseHook.beforeSwap.selector, returnDelta, 0);
     }
-
-    // function _afterSwap(address, PoolKey calldata key, IPoolManager.SwapParams calldata, BalanceDelta, bytes calldata)
-    //     internal
-    //     override
-    //     returns (bytes4, int128)
-    // {
-    //     return (BaseHook.afterSwap.selector, 0);
-    // }
 }
